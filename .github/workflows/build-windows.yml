@@ -1,0 +1,115 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip check
+
+      - name: Verify source
+        shell: pwsh
+        run: |
+          python -m py_compile LED_Screen_Designer_v20_27.py
+          python -c "import ast, pathlib; p=pathlib.Path('LED_Screen_Designer_v20_27.py'); s=p.read_text(encoding='utf-8'); assert 'def _show_startup_choice' in s; assert 'startup_action = \"МЦД\"' not in s; ast.parse(s); print('Startup selector: OK')"
+          python -c "from PIL import Image; im=Image.open('assets/app.ico'); print('Icon:', im.size, im.format)"
+
+      - name: Build Windows application
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onedir --windowed `
+            --name "LED_Screen_Designer_v20_27" `
+            --icon "assets/app.ico" `
+            --add-data "assets/app.ico;assets" `
+            --collect-all tkinterdnd2 `
+            --collect-all fitz `
+            --collect-all paddleocr `
+            --collect-all paddle `
+            --hidden-import PIL._tkinter_finder `
+            LED_Screen_Designer_v20_27.py
+
+      - name: Restore Tcl/Tk runtime data
+        shell: pwsh
+        run: |
+          $dist = Join-Path $PWD "dist/LED_Screen_Designer_v20_27"
+          $internal = Join-Path $dist "_internal"
+          New-Item -ItemType Directory -Force -Path $internal | Out-Null
+
+          $pyBase = python -c "import sys; print(sys.base_prefix)"
+          $tclRoot = Join-Path $pyBase "tcl"
+          $tclSrc = Join-Path $tclRoot "tcl8.6"
+          $tkSrc  = Join-Path $tclRoot "tk8.6"
+          $tclDst = Join-Path $internal "_tcl_data"
+          $tkDst  = Join-Path $internal "_tk_data"
+
+          Write-Host "Python base: $pyBase"
+          Write-Host "Tcl source:  $tclSrc"
+          Write-Host "Tk source:   $tkSrc"
+
+          if (!(Test-Path $tclSrc)) { throw "Tcl runtime source not found: $tclSrc" }
+          if (!(Test-Path $tkSrc))  { throw "Tk runtime source not found: $tkSrc" }
+
+          if (Test-Path $tclDst) { Remove-Item -Recurse -Force $tclDst }
+          if (Test-Path $tkDst)  { Remove-Item -Recurse -Force $tkDst }
+          Copy-Item -Recurse -Force $tclSrc $tclDst
+          Copy-Item -Recurse -Force $tkSrc  $tkDst
+
+      - name: Verify Windows runtime and build files
+        shell: pwsh
+        run: |
+          $dist = "dist/LED_Screen_Designer_v20_27"
+          $internal = Join-Path $dist "_internal"
+          $exe = Join-Path $dist "LED_Screen_Designer_v20_27.exe"
+          $initTcl = Join-Path $internal "_tcl_data/init.tcl"
+          $tkTcl = Join-Path $internal "_tk_data/tk.tcl"
+
+          if (!(Test-Path $exe))     { throw "EXE was not created" }
+          if (!(Test-Path $initTcl)) { throw "Tcl runtime incomplete: _internal/_tcl_data/init.tcl is missing" }
+          if (!(Test-Path $tkTcl))   { throw "Tk runtime incomplete: _internal/_tk_data/tk.tcl is missing" }
+
+          Write-Host "OK: EXE exists"
+          Write-Host "OK: Tcl runtime exists"
+          Write-Host "OK: Tk runtime exists"
+          Get-ChildItem $internal | Select-Object Name,Length
+
+      - name: Add troubleshooting launcher
+        shell: pwsh
+        run: |
+          @'
+          @echo off
+          setlocal
+          cd /d "%~dp0"
+          echo Starting LED Screen Designer v20.27...
+          echo If the program reports an error, check:
+          echo %%LOCALAPPDATA%%\LED_Screen_Designer\startup_error.log
+          start "" "LED_Screen_Designer_v20_27.exe"
+          pause
+          '@ | Set-Content -Encoding ASCII "dist/LED_Screen_Designer_v20_27/RUN_WITH_DIAGNOSTICS.bat"
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: LED_Screen_Designer_v20_27_Windows
+          path: dist/LED_Screen_Designer_v20_27/
+          if-no-files-found: error
+          compression-level: 6
